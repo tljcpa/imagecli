@@ -46,12 +46,12 @@ imagecli generate --provider fal --capability text2video --prompt "a cat surfing
 | provider | 能力 | 鉴权 | key 环境变量 |
 | -------- | ---- | ---- | ------------ |
 | **agnes** | t2i | Bearer(OpenAI 兼容) | `AGNES_API_KEY` | 新加坡 Agnes AI 免费层, ~30 RPM |
-| **fal** | t2i · t2v · i2v | Bearer(http-queue 异步) | `FAL_KEY` / `IMAGECLI_FAL_KEY` |
-| **google** | t2i | API key header | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| **fal** | t2i · t2v · i2v · upscale | Bearer(http-queue 异步) | `FAL_KEY` / `IMAGECLI_FAL_KEY` |
+| **google** | t2i · i2i | API key header | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | **openai** | t2i | Bearer | `OPENAI_API_KEY` |
-| **replicate** | t2i · t2v · i2v | Bearer(prediction 异步) | `REPLICATE_API_TOKEN` |
+| **replicate** | t2i · t2v · i2v · upscale | Bearer(prediction 异步) | `REPLICATE_API_TOKEN` |
 | **volcengine** | t2i · i2i | Bearer(方舟 Ark, OpenAI 兼容) | `ARK_API_KEY` | 字节 Seedream, 即梦同源 |
-| **jimeng** | t2i | 火山 AK/SK V4 签名 | `JIMENG_ACCESS_KEY` + `JIMENG_SECRET_KEY` | 即梦 visual API |
+| **jimeng** | t2i · i2i | 火山 AK/SK V4 签名 | `JIMENG_ACCESS_KEY` + `JIMENG_SECRET_KEY` | 即梦 visual API |
 | **kling** | t2v · i2v | 本地 HS256 JWT(AK/SK) | `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` | 快手可灵 |
 | **seedance** | t2v · i2v | Bearer(方舟 Ark, async-task) | `ARK_API_KEY` | 字节 Seedance 视频 |
 | **siliconflow** | t2i | Bearer(OpenAI-ish, 方言) | `SILICONFLOW_API_KEY` | 托管 Kolors/FLUX 等 |
@@ -92,10 +92,10 @@ model 列表与估算成本用 `imagecli model --json` 查。**接新的 OpenAI 
 
 ## 当前状态(诚实标注)
 
-- **能力**:t2i(11 家) · i2i(jimeng/volcengine, 本地图 base64 内联) · t2v/i2v(fal/replicate/seedance/kling)。
+- **能力**:t2i(11 家) · i2i(google/jimeng/volcengine, 本地图 base64 内联) · t2v/i2v(fal/replicate/seedance/kling) · upscale(fal/replicate)。
 - **真实验证**:agnes(多次真实出图 + 批量 + 故障转移)与 google(链路通、卡免费配额)已真打网络;**其余 provider 代码完整 + 离线测试通过,真实出图/出片待各自 key 联调坐实**。
-- **测试**:195 通过(单元 + 集成)。
-- **尚未做**:upscale(超分)、fal/replicate 本地图自动上传(现需先传成 URL)、per-model 参数 schema 校验。
+- **测试**:200+ 通过(单元 + 集成);三平台 CI(ubuntu/windows/macos)绿,Windows 可编可测已坐实。
+- **尚未做**:fal/replicate 本地图自动上传(现需先传成 URL)、per-model 参数 schema 校验。
 
 设计与取舍详见 `DECISIONS.md`(D-001~D-014),范围与验收见 `REQUIREMENTS.md`,测试覆盖见 `TEST-LOG.md`。
 
