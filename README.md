@@ -98,3 +98,7 @@ model 列表与估算成本用 `imagecli model --json` 查。**接新的 OpenAI 
 - **尚未做**:upscale(超分)、fal/replicate 本地图自动上传(现需先传成 URL)、per-model 参数 schema 校验。
 
 设计与取舍详见 `DECISIONS.md`(D-001~D-014),范围与验收见 `REQUIREMENTS.md`,测试覆盖见 `TEST-LOG.md`。
+
+## 用法示例
+
+`examples/` 下有一组可直接跑的示例脚本(文生图/图生图/文生视频/超分/批量与预算/故障转移/model 选择/MCP),每个脚本头部注明用途与所需 key 环境变量。见 `examples/README.md`。
