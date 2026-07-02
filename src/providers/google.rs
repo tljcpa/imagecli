@@ -48,9 +48,12 @@ impl GoogleProvider {
     pub fn new() -> GoogleProvider {
         GoogleProvider {
             http: reqwest::Client::new(),
-            // MVP 完整实现 text2image; 图生图需把输入图作为 inline_data 传入,
-            // 但当前 CLI 仅接受 URL 形态输入(无本地字节), 故暂不声明 image2image(留作缺口)。
-            caps: vec![Capability::Text2Image],
+            // Gemini 2.5 Flash Image(Nano Banana)同一 model 既能文生图也能图像编辑(图生图):
+            // 输入图作为 inline_data part 塞进请求, 复用同一 generateContent 端点与 model。
+            // 输入来源约束(诚实标注): Gemini inline 接口只吃内联字节(base64), 不接受远程 URL。
+            // 本 CLI 的 load_input_asset 会把本地文件读成内联字节、URL 维持 from_url;
+            // 故 i2i 实际生效的是本地图输入(URL 输入不会被塞进 inline_data, 见 build_gemini_request_body)。
+            caps: vec![Capability::Text2Image, Capability::Image2Image],
         }
     }
 }
@@ -215,13 +218,16 @@ impl Provider for GoogleProvider {
     }
 
     fn catalog(&self) -> Vec<crate::core::catalog::ModelEntry> {
-        // google 默认暴露 Gemini 文生图(alias "gemini-image")。
-        vec![crate::core::catalog::ModelEntry::single(
+        // Gemini 2.5 Flash Image 同一 model 既支持文生图也支持图像编辑(图生图):
+        // 一条 entry 同时声明 Text2Image 与 Image2Image(与即梦 4.0 同 model 双能力同构)。
+        let mut entry = crate::core::catalog::ModelEntry::single(
             PROVIDER_NAME,
             DEFAULT_T2I_MODEL,
             Some("gemini-image"),
             Capability::Text2Image,
-        )]
+        );
+        entry.capabilities.push(Capability::Image2Image);
+        vec![entry]
     }
 
     fn has_key(&self) -> bool {
@@ -390,6 +396,66 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].0, "image/jpeg");
         assert_eq!(parts[0].1, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn capabilities_declare_text2image_and_image2image() {
+        // google 应同时声明 t2i 与 i2i(Gemini 2.5 Flash Image 同 model 双能力)。
+        let p = GoogleProvider::new();
+        assert!(p.capabilities().contains(&Capability::Text2Image));
+        assert!(p.capabilities().contains(&Capability::Image2Image));
+    }
+
+    #[test]
+    fn catalog_entry_declares_both_capabilities() {
+        // 目录条目应把两种能力都挂在同一条(同 model)。
+        let p = GoogleProvider::new();
+        let cat = p.catalog();
+        assert_eq!(cat.len(), 1);
+        assert_eq!(cat[0].model_id, DEFAULT_T2I_MODEL);
+        assert!(cat[0].capabilities.contains(&Capability::Text2Image));
+        assert!(cat[0].capabilities.contains(&Capability::Image2Image));
+    }
+
+    #[test]
+    fn i2i_request_body_carries_inline_data_part() {
+        // i2i: 本地图作为内联字节输入 -> 请求体带 inlineData part(base64+mime)。
+        let req = GenRequest {
+            capability: Capability::Image2Image,
+            model: DEFAULT_T2I_MODEL.to_string(),
+            prompt: Some("turn the sky purple".to_string()),
+            inputs: vec![Asset::from_inline_bytes(
+                AssetKind::Image,
+                "image/jpeg",
+                vec![9, 8, 7, 6],
+            )],
+            params: serde_json::Map::new(),
+        };
+        let body = build_gemini_request_body(&req);
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        // 有且仅有一个 inlineData part(URL 输入不进 inline, 这里全是本地字节)。
+        let inline_parts: Vec<&Value> = parts.iter().filter(|p| p.get("inlineData").is_some()).collect();
+        assert_eq!(inline_parts.len(), 1);
+        assert_eq!(inline_parts[0]["inlineData"]["mimeType"].as_str(), Some("image/jpeg"));
+        // base64([9,8,7,6]) == "CQgHBg=="
+        assert_eq!(inline_parts[0]["inlineData"]["data"].as_str(), Some("CQgHBg=="));
+    }
+
+    #[test]
+    fn url_input_is_not_inlined_for_gemini() {
+        // 诚实边界: Gemini inline 接口不吃远程 URL, URL 形态输入不会被塞进 inline_data。
+        let req = GenRequest {
+            capability: Capability::Image2Image,
+            model: DEFAULT_T2I_MODEL.to_string(),
+            prompt: Some("edit this".to_string()),
+            inputs: vec![Asset::from_url(AssetKind::Image, "https://x/in.png".to_string())],
+            params: serde_json::Map::new(),
+        };
+        let body = build_gemini_request_body(&req);
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        // 只有 text part, 没有任何 inlineData(URL 输入被跳过)。
+        assert!(parts.iter().all(|p| p.get("inlineData").is_none()));
+        assert_eq!(parts[0]["text"].as_str(), Some("edit this"));
     }
 
     #[test]

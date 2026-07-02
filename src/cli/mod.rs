@@ -296,6 +296,8 @@ fn default_model_for(provider: &str, capability: Capability) -> Option<String> {
         },
         "google" => match capability {
             Capability::Text2Image => Some(google::DEFAULT_T2I_MODEL.to_string()),
+            // Gemini 图像编辑复用同一 model(Nano Banana 同端点吃 inline_data 输入图)。
+            Capability::Image2Image => Some(google::DEFAULT_T2I_MODEL.to_string()),
             _ => None,
         },
         "agnes" => match capability {
@@ -1474,6 +1476,21 @@ last one
         );
         // seedance 不给图像默认 model。
         assert!(default_model_for("seedance", Capability::Text2Image).is_none());
+    }
+
+    #[test]
+    fn default_model_for_google_t2i_and_i2i_same_model() {
+        // Gemini 图像编辑复用同一 model: t2i 与 i2i 都路由到 DEFAULT_T2I_MODEL。
+        assert_eq!(
+            default_model_for("google", Capability::Text2Image).as_deref(),
+            Some(google::DEFAULT_T2I_MODEL)
+        );
+        assert_eq!(
+            default_model_for("google", Capability::Image2Image).as_deref(),
+            Some(google::DEFAULT_T2I_MODEL)
+        );
+        // google 不涉足视频。
+        assert!(default_model_for("google", Capability::Text2Video).is_none());
     }
 
     #[test]

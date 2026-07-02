@@ -272,3 +272,10 @@
 
 ### 没覆盖(边界)
 - seedance i2v 的 data URI 喂图仅离线断言请求体形态; 未与真实 Ark API 联调(离线无 key), Ark content.image_url 接受 data URI 按 OpenAI 视觉兼容约定(与 volcengine 同 host 已用同法)推断, 未经真实网络确认。
+
+## 2026-07-02 google i2i 能力 + LICENSE
+- 改动: google capabilities()/catalog() 增 Image2Image; cli default_model_for google i2i 复用 DEFAULT_T2I_MODEL; 新增 LICENSE(MIT, tljcpa)。
+- 输入图处理(诚实): Gemini inline 接口只吃 base64 内联字节, 不吃远程 URL; load_input_asset 把本地文件读成内联字节, URL 维持 from_url; 故 i2i 实际生效于本地图输入, URL 输入不会被塞进 inline_data。
+- 测试: 新增 google 4 例(capabilities 双能力/catalog 双能力/i2i 请求体带 inline_data/URL 不 inline) + cli default_model_for google t2i&i2i 同 model 1 例。
+- 结果: build OK; clippy -D warnings OK; cargo test lib 203 passed(198->203, +5) 0 failed, 集成全绿。
+- 未覆盖边界: 未打真实 Gemini 网络做端到端 i2i(离线单测只验请求体构造与能力声明)。
