@@ -255,3 +255,20 @@
   - upscale 缩放参数名各家不同(fal=upscale_factor, replicate=scale), 走 --param 透传, 未做参数名归一/校验(交由用户按 model 传对)。
   - real-esrgan 的 scale 默认值(模型侧 4)未在 CLI 强制, 未传 --param 时用模型默认。
 - **复现**: `source ~/.cargo/env && export TMPDIR=/root/bigtmp && cargo build && cargo clippy --all-targets -- -D warnings && cargo test`。
+| 2026-07-02 | 跨平台 CI 三平台真实验证 | GitHub Actions ubuntu/windows/macos runner 跑 cargo build --release + test --release + clippy -D warnings | 全部 success(workflow run 28595578600, 5m16s)。**Windows 能编能测坐实**(此前只离线推断) | CI 不配 key、测试离线; 各家真实 API 出图仍待 key | push 自动触发; gh run list 查 |
+
+## 2026-07-02 · 代码质量 review(正确性 + 去重)
+
+### 做了什么
+- 全量通读 core/transport/providers(13 家)/cli/config/mcp, 复核并发/重试/签名/边界/跨 provider 一致性。
+- 修复 1 处正确性 bug: seedance(Ark)图生视频丢弃本地图。
+  - 现象: seedance 声明 image2video, 但 `build_seedance_body` 只认 `asset.url`, 本地图(CLI 读成 inline 字节)被静默丢弃, 产出纯文本请求(错误产物而非报错)。
+  - 改法: 改用 `Asset::as_input_image().to_image_field_string()`——URL 原样透传(行为不变), 本地图拼 data URI 写入 `image_url.url`, 与同走 Ark host 的 volcengine(OpenAI 视觉 content 风格)一致。
+  - 安全性: URL 路径断言不变(既有 `build_body_i2v_appends_image_url_content` 仍绿); 新增回归 `build_body_i2v_local_bytes_to_data_uri_image_url`。
+
+### 方法与结果
+- `cargo clippy --all-targets -- -D warnings`: 0 warning。
+- `cargo test`: 全绿。lib 197 -> 198(+1 seedance 本地图 i2v 回归); 集成 budget 3 / cross_process 1(+1 ignored)/ exit_code 5 / mcp 1 均不变。总计只增不减。
+
+### 没覆盖(边界)
+- seedance i2v 的 data URI 喂图仅离线断言请求体形态; 未与真实 Ark API 联调(离线无 key), Ark content.image_url 接受 data URI 按 OpenAI 视觉兼容约定(与 volcengine 同 host 已用同法)推断, 未经真实网络确认。

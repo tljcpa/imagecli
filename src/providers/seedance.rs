@@ -106,7 +106,7 @@ fn task_url(task_id: &str) -> String {
 ///
 /// 形态: `{ "model": <model>, "content": [ ... ], <透传的自由参数> }`。
 ///   - prompt 存在则作为一条 `{type:"text", text:<prompt>}` 加入 content。
-///   - 每个 URL 形态的图片输入作为一条 `{type:"image_url", image_url:{url}}` 加入 content
+///   - 每个图片输入作为一条 `{type:"image_url", image_url:{url}}` 加入 content
 ///     (图生视频用; 纯文生视频通常无图片输入)。
 ///   - params 里的自由参数(如 resolution / duration / ratio / seed)整体并入顶层透传。
 pub fn build_seedance_body(req: &GenRequest) -> Value {
@@ -117,13 +117,19 @@ pub fn build_seedance_body(req: &GenRequest) -> Value {
         content.push(json!({ "type": "text", "text": prompt }));
     }
 
-    // 图片输入(图生视频): 仅接受已是 URL 的输入(本地路径需先上传, 与 fal/replicate 一致)。
+    // 图片输入(图生视频): 经 Asset::as_input_image 归一后写入 image_url.url。
+    // 修改原因: 原实现只认 asset.url、直接丢弃本地图(inline 字节), 导致声明了 image2video
+    // 能力的 seedance 在用户传本地图时静默产出"纯文本"请求(错误产物而非报错), 是正确性 bug。
+    // 安全性: URL 输入行为完全不变(to_image_field_string 对 URL 原样透传); 本地图改为拼 data URI,
+    // 与同走 Ark host 的 volcengine(OpenAI 视觉 content 风格)已落地的喂图方式一致, 未改 URL 语义。
     for asset in req.inputs.iter() {
-        let is_image = matches!(asset.kind, AssetKind::Image);
-        if is_image {
-            if let Some(url) = &asset.url {
-                content.push(json!({ "type": "image_url", "image_url": { "url": url } }));
-            }
+        if !matches!(asset.kind, AssetKind::Image) {
+            continue;
+        }
+        if let Some(img) = asset.as_input_image() {
+            // to_image_field_string: URL 原样, 本地字节拼 data URI(与其余 provider 一致)。
+            let url = img.to_image_field_string();
+            content.push(json!({ "type": "image_url", "image_url": { "url": url } }));
         }
     }
 
@@ -374,6 +380,32 @@ mod tests {
         assert_eq!(content[0]["type"], json!("text"));
         assert_eq!(content[1]["type"], json!("image_url"));
         assert_eq!(content[1]["image_url"]["url"], json!("https://x/in.png"));
+    }
+
+    #[test]
+    fn build_body_i2v_local_bytes_to_data_uri_image_url() {
+        // 回归: 本地图(内联字节)图生视频 -> image_url.url 为 data URI, 不再被静默丢弃。
+        // base64(0x01020304)="AQIDBA==", data URI = data:image/png;base64,AQIDBA==。
+        let req = GenRequest {
+            capability: Capability::Image2Video,
+            model: DEFAULT_I2V_MODEL.to_string(),
+            prompt: Some("make it move".to_string()),
+            inputs: vec![Asset::from_inline_bytes(
+                AssetKind::Image,
+                "image/png",
+                vec![1u8, 2, 3, 4],
+            )],
+            params: serde_json::Map::new(),
+        };
+        let body = build_seedance_body(&req);
+        let content = body.get("content").unwrap().as_array().unwrap();
+        // text + image_url 两条(本地图不再被丢弃)。
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], json!("image_url"));
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            json!("data:image/png;base64,AQIDBA==")
+        );
     }
 
     #[test]
