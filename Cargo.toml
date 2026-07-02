@@ -1,0 +1,51 @@
+[package]
+name = "imagecli"
+version = "0.1.0"
+edition = "2021"
+description = "通用多 provider 图像/视频生成 CLI"
+license = "MIT"
+
+[dependencies]
+# 异步运行时, 只开需要的特性以减小编译面
+# io-std + io-util: MCP server 走 stdio, 需要 tokio 的 stdin/stdout 与 AsyncBufRead/Write 扩展
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "process", "io-std", "io-util"] }
+# HTTP 客户端, 用 rustls 避免依赖系统 openssl; json 特性用于直接收发 JSON
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# 命令行解析, derive 风格
+clap = { version = "4", features = ["derive"] }
+# 序列化/反序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 错误处理: anyhow 用于应用层, thiserror 用于库内错误类型
+anyhow = "1"
+thiserror = "2"
+# 异步 trait
+async-trait = "0.1"
+# 系统钥匙串, 密钥回退存储
+# 选 linux-native(内核 keyutils)后端: 纯 Rust, 不依赖 dbus/openssl 等系统库, 编译最稳
+keyring = { version = "3", default-features = false, features = ["linux-native"] }
+# 金额/成本估算用定点十进制, 绝不用 f64
+rust_decimal = "1"
+# 随机数, 用于轮询退避的 jitter
+rand = "0.8"
+# future 工具, 用于并发 join
+futures = "0.3"
+# SQLite 持久化任务状态。bundled: 静态编译 sqlite, 保持单二进制, 不依赖系统 libsqlite
+rusqlite = { version = "0.31", features = ["bundled"] }
+# 跨平台标准目录(XDG data dir), 用于定位 ~/.local/share/imagecli/jobs.db
+directories = "5"
+# base64 编解码: Gemini 产物是 base64 inline 字节, 需解码后落盘
+base64 = "0.22"
+# 交互式终端选择器(/model 式菜单), 仅在 stdout 是 TTY 时使用; 无 TTY 降级为列表
+dialoguer = { version = "0.11", default-features = false }
+# 默认配置(默认 provider/model)持久化, 与 key 分离, 落 ~/.config/imagecli/config.toml
+toml = "0.8"
+# HMAC-SHA256: 可灵 HS256 JWT 签名 与 即梦火山 V4 签名 同为 HMAC-SHA256, 一套覆盖两家
+hmac = "0.12"
+sha2 = "0.10"
+# 十六进制编解码: 火山 V4 签名的 payload 哈希、各级签名结果需 hex 串
+hex = "0.4"
+
+[dev-dependencies]
+# 测试时需要的额外能力(当前主要用 tokio 宏)
+tokio = { version = "1", features = ["rt", "macros"] }

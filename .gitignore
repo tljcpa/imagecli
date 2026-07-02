@@ -1,0 +1,10 @@
+/target
+/out
+*.png
+*.mp4
+*.jpg
+*.jpeg
+*.db
+config.toml
+.DS_Store
+*.tmp.*
