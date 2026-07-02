@@ -290,6 +290,8 @@ fn default_model_for(provider: &str, capability: Capability) -> Option<String> {
             // fal 视频仍走同一 Queue API, 只是 endpoint/产物不同(D-011 复用现有 provider 加 video)。
             Capability::Text2Video => Some(fal::DEFAULT_T2V_MODEL.to_string()),
             Capability::Image2Video => Some(fal::DEFAULT_I2V_MODEL.to_string()),
+            // 超分: clarity-upscaler, 仍走 Queue API, 输入 image_url、产物 image.url。
+            Capability::Upscale => Some(fal::DEFAULT_UPSCALE_MODEL.to_string()),
             _ => None,
         },
         "google" => match capability {
@@ -332,6 +334,8 @@ fn default_model_for(provider: &str, capability: Capability) -> Option<String> {
             // Replicate 视频仍走 prediction 异步, 只是 model/产物不同(D-011 复用现有 provider 加 video)。
             Capability::Text2Video => Some(replicate::DEFAULT_T2V_MODEL.to_string()),
             Capability::Image2Video => Some(replicate::DEFAULT_I2V_MODEL.to_string()),
+            // 超分: real-esrgan, 仍走 prediction 异步, 输入 image、output 是更高清图 url。
+            Capability::Upscale => Some(replicate::DEFAULT_UPSCALE_MODEL.to_string()),
             _ => None,
         },
         // D-014 视频: 火山方舟 Seedance, 文生视频/图生视频各有默认 model。
@@ -1470,6 +1474,21 @@ last one
         );
         // seedance 不给图像默认 model。
         assert!(default_model_for("seedance", Capability::Text2Image).is_none());
+    }
+
+    #[test]
+    fn default_model_for_upscale_fal_and_replicate() {
+        // 超分能力路由到 fal/replicate 的默认超分 model(打通 upscale capability)。
+        assert_eq!(
+            default_model_for("fal", Capability::Upscale).as_deref(),
+            Some(fal::DEFAULT_UPSCALE_MODEL)
+        );
+        assert_eq!(
+            default_model_for("replicate", Capability::Upscale).as_deref(),
+            Some(replicate::DEFAULT_UPSCALE_MODEL)
+        );
+        // 不支持超分的 provider(如 agnes)无默认超分 model。
+        assert!(default_model_for("agnes", Capability::Upscale).is_none());
     }
 
     #[test]

@@ -235,3 +235,23 @@
   - model --json:含 fal-kling/fal-kling-i2v/fal-minimax、rep-kling/rep-kling-i2v/rep-minimax,能力标 text2video/image2video。
   - 无 key `generate --provider fal --capability text2video`:走到缺 key 报错(路由通),预估成本 0.50 USD,真实退出码 1。
 - **未覆盖边界**:未做真实联调(无 key);fal/replicate 视频 endpoint 版本号会随平台改版而变(注释已标以平台为准,可 --model 覆盖);本地文件输入图仍需先是 URL(与图像 i2i 一致,未实现自动上传);视频参数(duration/aspect_ratio)靠 --param 透传,未做 per-model schema 校验。
+
+## 2026-07-02 · fal/replicate 加 upscale(图片超分)能力
+
+- **测了什么**: 给 fal(clarity-upscaler)与 replicate(real-esrgan)加超分能力, 复用异步骨架。
+- **方法/结果**:
+  - `cargo build`: 通过。
+  - `cargo clippy --all-targets -- -D warnings`: 通过, 无告警。
+  - `cargo test`: 全绿。lib 197 passed(原 185, 新增 12: fal 5 / replicate 6 / cli 1); 集成 budget 3 / cross_process 1(+1 ignored) / exit_code 5 / mcp 1, 全过。
+  - `imagecli providers`: fal 与 replicate 能力均含 upscale。
+  - `imagecli models --provider {fal,replicate}`: 各含 upscale 条目(fal-ai/clarity-upscaler 别名 fal-upscale; nightmareai/real-esrgan 别名 rep-upscale), est $0.01。
+  - 冒烟(无 key): `generate --provider fal --capability upscale --input <url> --param scale=2` -> 缺 key 报错, 退出码 1; replicate 同, 退出码 1。证明 upscale 路由已通到各家 submit。
+- **新增单测**:
+  - fal: capabilities 含 upscale; catalog 含 upscale 条目; upscale 请求体 URL 入 image_url + upscale_factor 透传; 本地图入 data URI; 单 image 对象产物解析。
+  - replicate: capabilities 含 upscale; catalog 含 upscale 条目; upscale 请求体 URL 入 input.image(非 start_image)+ scale 透传; 本地图入 data URI; output_kind=Image; 单 url 产物标 Image。
+  - cli: default_model_for 对 fal/replicate 的 Upscale 返回各自默认超分 model; 不支持的家(agnes)返回 None。
+- **没覆盖(边界)**:
+  - 真实 API 联调(需付费 key): 未打真实网络, 产物字段解析仅按 WebFetch 核实的响应结构离线断言(fal clarity-upscaler 产物 image.url 已核实; real-esrgan output 单 url 字符串由 WebSearch 佐证)。
+  - upscale 缩放参数名各家不同(fal=upscale_factor, replicate=scale), 走 --param 透传, 未做参数名归一/校验(交由用户按 model 传对)。
+  - real-esrgan 的 scale 默认值(模型侧 4)未在 CLI 强制, 未传 --param 时用模型默认。
+- **复现**: `source ~/.cargo/env && export TMPDIR=/root/bigtmp && cargo build && cargo clippy --all-targets -- -D warnings && cargo test`。

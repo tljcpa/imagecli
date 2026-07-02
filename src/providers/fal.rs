@@ -35,6 +35,12 @@ pub const DEFAULT_T2V_MODEL: &str = "fal-ai/kling-video/v2/master/text-to-video"
 /// 图生视频默认 model(同上, 以 fal 平台为准, 可被 --model 覆盖)。
 pub const DEFAULT_I2V_MODEL: &str = "fal-ai/kling-video/v2/master/image-to-video";
 
+/// 超分(upscale)默认 model。WebFetch 核实(fal.ai/models/fal-ai/clarity-upscaler/api):
+/// 输入必填 `image_url`(待放大图 URL), 缩放参数 `upscale_factor`(float, 默认 2),
+/// 产物在响应 `image.url`(更高清图)。仍走同一套 Queue API, 只是 endpoint 与产物字段不同,
+/// 可被 --model 覆盖(如 fal-ai/esrgan / fal-ai/aura-sr)。产物是 Image(不是 video)。
+pub const DEFAULT_UPSCALE_MODEL: &str = "fal-ai/clarity-upscaler";
+
 /// 一次提交后需要记住的"句柄": 后续 poll/cancel 要用到的 URL。
 ///
 /// 为什么不再用内存表存它: trait 的 poll/cancel 现在接收完整 Job(D-007),
@@ -107,6 +113,8 @@ impl FalProvider {
                 Capability::Text2Image,
                 Capability::Text2Video,
                 Capability::Image2Video,
+                // 超分: 复用同一 Queue API, endpoint(如 clarity-upscaler)输入 image_url、产物 image.url。
+                Capability::Upscale,
             ],
         }
     }
@@ -153,7 +161,9 @@ pub fn map_fal_status(raw: &str) -> JobStatus {
 /// 规则:
 /// - prompt 存在则写入 "prompt" 字段。
 /// - params 里的自由参数(image_size / num_images / seed / ...)整体并入顶层透传。
-/// - 输入素材里第一张 image 的 URL 写入 "image_url"(供图生图类 endpoint 用)。
+/// - 输入素材里第一张 image 写入 "image_url"(供图生图/超分类 endpoint 用):
+///   远程 URL 原样透传; 本地图(内联字节, CLI 已读成 base64+mime)拼成 data URI 塞入。
+///   image_url 既服务图生图, 也是超分(clarity-upscaler 等)的待放大图字段, 复用同一路径。
 ///   纯文生图通常没有输入, 该字段就不出现。
 pub fn build_fal_request_body(req: &GenRequest) -> Value {
     // 以一个空 JSON 对象起步
@@ -165,16 +175,19 @@ pub fn build_fal_request_body(req: &GenRequest) -> Value {
     }
 
     // 透传自由参数。用户给的 params 优先级最高, 直接覆盖同名默认。
+    // 超分的缩放参数(clarity-upscaler 的 upscale_factor 等)走 --param 透传, 在此并入。
     for (k, v) in req.params.iter() {
         body.insert(k.clone(), v.clone());
     }
 
-    // 第一张图片输入 -> image_url(若有 URL)。本地路径需先上传(Uploader), MVP 暂只接受已是 URL 的输入。
+    // 第一张图片输入 -> image_url。经 Asset::as_input_image 归一: URL 直接透传;
+    // 本地字节(CLI 读入的 inline)拼成 data URI(fal 的 image_url 接受 data URI)。
+    // 纯 local_path(未读字节)返回 None, 此处跳过(CLI 加载阶段已把本地图读成 inline)。
     for asset in req.inputs.iter() {
         let is_image = matches!(asset.kind, AssetKind::Image);
         if is_image {
-            if let Some(url) = &asset.url {
-                body.insert("image_url".to_string(), json!(url));
+            if let Some(img) = asset.as_input_image() {
+                body.insert("image_url".to_string(), json!(img.to_image_field_string()));
                 break;
             }
         }
@@ -260,6 +273,14 @@ impl Provider for FalProvider {
                 "fal-ai/minimax/hailuo-02/standard/text-to-video",
                 Some("fal-minimax"),
                 Capability::Text2Video,
+            ),
+            // 超分: Clarity Upscaler(alias "fal-upscale")。输入 image_url、参数 upscale_factor,
+            // 产物 image.url(更高清图)。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_UPSCALE_MODEL,
+                Some("fal-upscale"),
+                Capability::Upscale,
             ),
         ]
     }
@@ -487,6 +508,71 @@ mod tests {
             .find(|e| e.capabilities.contains(&Capability::Image2Video))
             .expect("fal catalog 应含图生视频条目");
         assert_eq!(i2v.model_id, DEFAULT_I2V_MODEL);
+    }
+
+    #[test]
+    fn capabilities_declare_upscale() {
+        // fal 声明支持超分。
+        let p = FalProvider::new();
+        assert!(p.capabilities().contains(&Capability::Upscale));
+    }
+
+    #[test]
+    fn catalog_contains_upscale_model() {
+        // catalog 应含超分条目, 能力标 upscale, model 为 clarity-upscaler。
+        let p = FalProvider::new();
+        let cat = p.catalog();
+        let up = cat
+            .iter()
+            .find(|e| e.capabilities.contains(&Capability::Upscale))
+            .expect("fal catalog 应含超分条目");
+        assert_eq!(up.model_id, DEFAULT_UPSCALE_MODEL);
+        assert_eq!(up.alias.as_deref(), Some("fal-upscale"));
+    }
+
+    #[test]
+    fn build_upscale_body_puts_url_in_image_url_with_factor() {
+        // 超分: 待放大图(URL)写入 image_url; scale 参数(upscale_factor)经 params 透传。
+        let mut params = serde_json::Map::new();
+        params.insert("upscale_factor".to_string(), json!(2));
+        let req = GenRequest {
+            capability: Capability::Upscale,
+            model: DEFAULT_UPSCALE_MODEL.to_string(),
+            prompt: None,
+            inputs: vec![Asset::from_url(AssetKind::Image, "https://x/low.png")],
+            params,
+        };
+        let body = build_fal_request_body(&req);
+        assert_eq!(body.get("image_url").unwrap(), &json!("https://x/low.png"));
+        assert_eq!(body.get("upscale_factor").unwrap(), &json!(2));
+    }
+
+    #[test]
+    fn build_upscale_body_local_image_becomes_data_uri() {
+        // 本地图(内联字节)超分: image_url 应是 data URI(fal 接受), 复用 i2i 喂图路径。
+        let req = GenRequest {
+            capability: Capability::Upscale,
+            model: DEFAULT_UPSCALE_MODEL.to_string(),
+            prompt: None,
+            // 0x01020304 -> base64 "AQIDBA=="
+            inputs: vec![Asset::from_inline_bytes(AssetKind::Image, "image/png", vec![1, 2, 3, 4])],
+            params: serde_json::Map::new(),
+        };
+        let body = build_fal_request_body(&req);
+        assert_eq!(
+            body.get("image_url").unwrap(),
+            &json!("data:image/png;base64,AQIDBA==")
+        );
+    }
+
+    #[test]
+    fn extract_upscale_output_reads_single_image_object() {
+        // clarity-upscaler 产物在单个 image 对象的 url; 应解析成一张 Image。
+        let result = json!({ "image": { "url": "https://cdn.fal.ai/up.png", "width": 2048 } });
+        let outputs = extract_outputs(&result);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, AssetKind::Image);
+        assert_eq!(outputs[0].url.as_deref(), Some("https://cdn.fal.ai/up.png"));
     }
 
     #[test]

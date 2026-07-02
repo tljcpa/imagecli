@@ -39,6 +39,12 @@ pub const DEFAULT_T2V_MODEL: &str = "kwaivgi/kling-v2.1";
 /// 图生视频默认 model(同上, 以 Replicate 平台为准, 可被 --model 覆盖)。
 pub const DEFAULT_I2V_MODEL: &str = "kwaivgi/kling-v2.1";
 
+/// 超分默认 model。WebFetch/核实(replicate.com/nightmareai/real-esrgan):
+/// 输入 `image`(URL 或 base64/data URI), 缩放参数 `scale`(number, 示例用 2, 模型默认 4),
+/// 另有可选 `face_enhance`; output 是单个更高清图 URL 字符串。仍走 prediction 异步,
+/// 可被 --model 覆盖(如 philz1337x/clarity-upscaler)。产物是 Image。
+pub const DEFAULT_UPSCALE_MODEL: &str = "nightmareai/real-esrgan";
+
 /// 一次提交后需记住的句柄: 后续 poll/cancel 要用到的 URL。
 ///
 /// 与 fal 同模式: 句柄随 Job.raw_meta 落进 store 跨进程流转, provider 本身无状态。
@@ -136,6 +142,8 @@ impl ReplicateProvider {
                 Capability::Text2Image,
                 Capability::Text2Video,
                 Capability::Image2Video,
+                // 超分: 仍走 prediction 异步, 只是 model(如 real-esrgan)输入 image、output 是更高清图 url。
+                Capability::Upscale,
             ],
         }
     }
@@ -198,9 +206,10 @@ pub fn build_prediction_body(req: &GenRequest) -> Value {
         input.insert(k.clone(), v.clone());
     }
 
-    // 第一张图片输入 -> 喂图字段(若已是 URL)。本地路径需先上传, MVP 仅接受 URL 输入。
+    // 第一张图片输入 -> 喂图字段。URL 原样透传; 本地图(内联字节)拼 data URI(real-esrgan
+    // 等接受 base64/data URI)。经 Asset::as_input_image 归一, 纯 local_path(未读字节)跳过。
     // 字段名随能力区分: 图生视频(image2video)Replicate 视频模型(如 kling)用 `start_image`;
-    // 图生图(image2image)用 `image`。两个字段名不同, 按 capability 选对字段, 否则模型忽略输入图。
+    // 图生图(image2image)与超分(upscale, real-esrgan)用 `image`。按 capability 选对字段。
     let image_field = match req.capability {
         Capability::Image2Video => "start_image",
         _ => "image",
@@ -208,8 +217,8 @@ pub fn build_prediction_body(req: &GenRequest) -> Value {
     for asset in req.inputs.iter() {
         let is_image = matches!(asset.kind, AssetKind::Image);
         if is_image {
-            if let Some(url) = &asset.url {
-                input.insert(image_field.to_string(), json!(url));
+            if let Some(img) = asset.as_input_image() {
+                input.insert(image_field.to_string(), json!(img.to_image_field_string()));
                 break;
             }
         }
@@ -320,6 +329,13 @@ impl Provider for ReplicateProvider {
                 "minimax/video-01",
                 Some("rep-minimax"),
                 Capability::Text2Video,
+            ),
+            // 超分: Real-ESRGAN(alias "rep-upscale")。输入 image、参数 scale, output 是更高清图 url。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_UPSCALE_MODEL,
+                Some("rep-upscale"),
+                Capability::Upscale,
             ),
         ]
     }
@@ -680,6 +696,78 @@ mod tests {
         assert_eq!(body["input"]["start_image"].as_str(), Some("https://x/in.png"));
         // image2video 不应把图放进 image 字段
         assert!(body["input"].get("image").is_none());
+    }
+
+    #[test]
+    fn capabilities_declare_upscale() {
+        // Replicate 声明支持超分。
+        let p = ReplicateProvider::new();
+        assert!(p.capabilities().contains(&Capability::Upscale));
+    }
+
+    #[test]
+    fn catalog_contains_upscale_model() {
+        // catalog 应含超分条目, 能力标 upscale, model 为 real-esrgan。
+        let p = ReplicateProvider::new();
+        let cat = p.catalog();
+        let up = cat
+            .iter()
+            .find(|e| e.capabilities.contains(&Capability::Upscale))
+            .expect("Replicate catalog 应含超分条目");
+        assert_eq!(up.model_id, DEFAULT_UPSCALE_MODEL);
+        assert_eq!(up.alias.as_deref(), Some("rep-upscale"));
+    }
+
+    #[test]
+    fn build_upscale_body_puts_url_in_image_with_scale() {
+        // 超分: 待放大图(URL)写入 input.image; scale 参数经 params 透传。
+        let mut params = serde_json::Map::new();
+        params.insert("scale".to_string(), json!(2));
+        let req = GenRequest {
+            capability: Capability::Upscale,
+            model: DEFAULT_UPSCALE_MODEL.to_string(),
+            prompt: None,
+            inputs: vec![Asset::from_url(AssetKind::Image, "https://x/low.png")],
+            params,
+        };
+        let body = build_prediction_body(&req);
+        assert_eq!(body["input"]["image"].as_str(), Some("https://x/low.png"));
+        assert_eq!(body["input"]["scale"].as_i64(), Some(2));
+        // 超分用 image 字段而非 start_image。
+        assert!(body["input"].get("start_image").is_none());
+    }
+
+    #[test]
+    fn build_upscale_body_local_image_becomes_data_uri() {
+        // 本地图(内联字节)超分: input.image 应是 data URI(real-esrgan 接受), 复用喂图路径。
+        let req = GenRequest {
+            capability: Capability::Upscale,
+            model: DEFAULT_UPSCALE_MODEL.to_string(),
+            prompt: None,
+            inputs: vec![Asset::from_inline_bytes(AssetKind::Image, "image/png", vec![1, 2, 3, 4])],
+            params: serde_json::Map::new(),
+        };
+        let body = build_prediction_body(&req);
+        assert_eq!(
+            body["input"]["image"].as_str(),
+            Some("data:image/png;base64,AQIDBA==")
+        );
+    }
+
+    #[test]
+    fn upscale_output_kind_is_image() {
+        // 超分产物是图片(而非视频), output_kind 应为 Image, 落盘为图片扩展名。
+        assert_eq!(output_kind_for(Capability::Upscale), AssetKind::Image);
+    }
+
+    #[test]
+    fn extract_upscale_output_single_url_as_image() {
+        // real-esrgan output 是单个更高清图 url 字符串, 应标成 Image。
+        let output = json!("https://replicate.delivery/up.png");
+        let outputs = extract_replicate_outputs(&output, AssetKind::Image);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, AssetKind::Image);
+        assert_eq!(outputs[0].url.as_deref(), Some("https://replicate.delivery/up.png"));
     }
 
     #[test]
