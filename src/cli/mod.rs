@@ -281,11 +281,15 @@ fn resolve_effective_model(
     None
 }
 
-/// 按能力取默认 model。目前 fal 与 google 的 text2image 各有默认。
+/// 按能力取默认 model。各 provider 按其声明的能力给默认 model
+/// (fal/replicate 除 text2image 外还有 text2video/image2video 默认视频 endpoint)。
 fn default_model_for(provider: &str, capability: Capability) -> Option<String> {
     match provider {
         "fal" => match capability {
             Capability::Text2Image => Some(fal::DEFAULT_T2I_MODEL.to_string()),
+            // fal 视频仍走同一 Queue API, 只是 endpoint/产物不同(D-011 复用现有 provider 加 video)。
+            Capability::Text2Video => Some(fal::DEFAULT_T2V_MODEL.to_string()),
+            Capability::Image2Video => Some(fal::DEFAULT_I2V_MODEL.to_string()),
             _ => None,
         },
         "google" => match capability {
@@ -325,6 +329,9 @@ fn default_model_for(provider: &str, capability: Capability) -> Option<String> {
         },
         "replicate" => match capability {
             Capability::Text2Image => Some(replicate::DEFAULT_T2I_MODEL.to_string()),
+            // Replicate 视频仍走 prediction 异步, 只是 model/产物不同(D-011 复用现有 provider 加 video)。
+            Capability::Text2Video => Some(replicate::DEFAULT_T2V_MODEL.to_string()),
+            Capability::Image2Video => Some(replicate::DEFAULT_I2V_MODEL.to_string()),
             _ => None,
         },
         // D-014 视频: 火山方舟 Seedance, 文生视频/图生视频各有默认 model。

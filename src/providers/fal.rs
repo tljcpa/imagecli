@@ -26,6 +26,15 @@ const FAL_QUEUE_BASE: &str = "https://queue.fal.run";
 /// text2image 的默认 model(Flux dev 文生图 endpoint)。
 pub const DEFAULT_T2I_MODEL: &str = "fal-ai/flux/dev";
 
+/// 文生视频默认 model(fal 视频仍走同一套 Queue API, 只是 endpoint 与产物不同)。
+///
+/// 注意: fal 视频 endpoint 会随平台上下架/改版而变(如 kling 的版本号 v2/master),
+/// 这里只给一个 WebFetch 核实(2026-06-26)当时可用的合理默认, 用户可用 `--model`
+/// 覆盖任意 fal 视频 endpoint, 绝不硬依赖某个确切版本号。产物在响应 `video.url`。
+pub const DEFAULT_T2V_MODEL: &str = "fal-ai/kling-video/v2/master/text-to-video";
+/// 图生视频默认 model(同上, 以 fal 平台为准, 可被 --model 覆盖)。
+pub const DEFAULT_I2V_MODEL: &str = "fal-ai/kling-video/v2/master/image-to-video";
+
 /// 一次提交后需要记住的"句柄": 后续 poll/cancel 要用到的 URL。
 ///
 /// 为什么不再用内存表存它: trait 的 poll/cancel 现在接收完整 Job(D-007),
@@ -92,8 +101,13 @@ impl FalProvider {
     pub fn new() -> FalProvider {
         FalProvider {
             http: reqwest::Client::new(),
-            // MVP 声明 text2image 完整可用; 图生图/视频留待后续扩展
-            caps: vec![Capability::Text2Image],
+            // 声明 text2image + 文生视频/图生视频。fal 托管大量视频模型, 仍走同一 Queue API,
+            // 只是 model endpoint 不同、产物是 video(响应 video.url), 复用现有 http-queue 骨架。
+            caps: vec![
+                Capability::Text2Image,
+                Capability::Text2Video,
+                Capability::Image2Video,
+            ],
         }
     }
 
@@ -217,13 +231,37 @@ impl Provider for FalProvider {
     }
 
     fn catalog(&self) -> Vec<crate::core::catalog::ModelEntry> {
-        // fal 默认暴露 text2image 的 Flux dev(alias "flux"); 后续接更多 endpoint 时在此追加。
-        vec![crate::core::catalog::ModelEntry::single(
-            PROVIDER_NAME,
-            DEFAULT_T2I_MODEL,
-            Some("flux"),
-            Capability::Text2Image,
-        )]
+        // fal 暴露 text2image 的 Flux dev(alias "flux"), 以及若干视频 endpoint。
+        // 视频 endpoint 版本号以 fal 平台为准, 可 --model 覆盖; 产物为 video.url。
+        vec![
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_T2I_MODEL,
+                Some("flux"),
+                Capability::Text2Image,
+            ),
+            // 文生视频: Kling v2 master(alias "fal-kling")。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_T2V_MODEL,
+                Some("fal-kling"),
+                Capability::Text2Video,
+            ),
+            // 图生视频: Kling v2 master i2v(alias "fal-kling-i2v")。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_I2V_MODEL,
+                Some("fal-kling-i2v"),
+                Capability::Image2Video,
+            ),
+            // 文生视频: MiniMax Hailuo(alias "fal-minimax")。fal 平台上另一常用视频家族。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                "fal-ai/minimax/hailuo-02/standard/text-to-video",
+                Some("fal-minimax"),
+                Capability::Text2Video,
+            ),
+        ]
     }
 
     fn has_key(&self) -> bool {
@@ -423,6 +461,32 @@ mod tests {
         assert_eq!(outputs[0].url.as_deref(), Some("https://cdn.fal.ai/a.png"));
         assert_eq!(outputs[1].url.as_deref(), Some("https://cdn.fal.ai/b.png"));
         assert_eq!(outputs[0].kind, AssetKind::Image);
+    }
+
+    #[test]
+    fn capabilities_declare_image_and_video() {
+        // fal 现在同时声明文生图与文生/图生视频(复用同一 Queue API)。
+        let p = FalProvider::new();
+        assert!(p.capabilities().contains(&Capability::Text2Image));
+        assert!(p.capabilities().contains(&Capability::Text2Video));
+        assert!(p.capabilities().contains(&Capability::Image2Video));
+    }
+
+    #[test]
+    fn catalog_contains_video_models() {
+        // catalog 应含视频 model 条目, 且能力标 video。
+        let p = FalProvider::new();
+        let cat = p.catalog();
+        let t2v = cat
+            .iter()
+            .find(|e| e.capabilities.contains(&Capability::Text2Video))
+            .expect("fal catalog 应含文生视频条目");
+        assert_eq!(t2v.model_id, DEFAULT_T2V_MODEL);
+        let i2v = cat
+            .iter()
+            .find(|e| e.capabilities.contains(&Capability::Image2Video))
+            .expect("fal catalog 应含图生视频条目");
+        assert_eq!(i2v.model_id, DEFAULT_I2V_MODEL);
     }
 
     #[test]

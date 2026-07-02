@@ -29,6 +29,16 @@ const REPLICATE_API_BASE: &str = "https://api.replicate.com/v1";
 /// text2image 默认 model(官方模型 owner/name 形式; BFL Flux Schnell, 最快)。
 pub const DEFAULT_T2I_MODEL: &str = "black-forest-labs/flux-schnell";
 
+/// 文生视频默认 model(owner/name 形式, 仍走 prediction 异步, output 为 video url)。
+///
+/// 注意: Replicate 视频模型 owner/name 会随上下架/版本更新而变(如 kling 的 v2.1),
+/// 这里只给 WebFetch 核实(2026-06-26)当时可用的合理默认, 用户可 `--model owner/name`
+/// 覆盖任意 Replicate 视频模型, 绝不硬依赖某个确切版本。图生视频用同一 kling 模型
+/// (Replicate 官方 kling 同模型既支持纯 prompt 也支持带 start_image)。
+pub const DEFAULT_T2V_MODEL: &str = "kwaivgi/kling-v2.1";
+/// 图生视频默认 model(同上, 以 Replicate 平台为准, 可被 --model 覆盖)。
+pub const DEFAULT_I2V_MODEL: &str = "kwaivgi/kling-v2.1";
+
 /// 一次提交后需记住的句柄: 后续 poll/cancel 要用到的 URL。
 ///
 /// 与 fal 同模式: 句柄随 Job.raw_meta 落进 store 跨进程流转, provider 本身无状态。
@@ -41,19 +51,25 @@ struct ReplicateHandle {
     get_url: String,
     /// 取消用的 URL(Replicate 返回的 urls.cancel, 可缺)。
     cancel_url: Option<String>,
+    /// 产物应标成的 AssetKind(Image / Video)。submit 时按 capability 定, 随句柄跨进程流转,
+    /// 让 poll(无 capability 上下文)也能把视频 output 正确标成 Video 而非 Image(决定落盘扩展名)。
+    output_kind: AssetKind,
 }
 
 impl ReplicateHandle {
     /// 序列化进 Job.raw_meta。submit 时写, poll/cancel 时读。
+    /// output_kind 存为稳定字符串("image"/"video"), 便于跨进程还原。
     fn to_raw_meta(&self) -> Value {
         json!({
             "prediction_id": self.prediction_id,
             "get_url": self.get_url,
             "cancel_url": self.cancel_url,
+            "output_kind": asset_kind_to_str(self.output_kind),
         })
     }
 
     /// 从 Job.raw_meta 还原句柄。缺 get_url 时给清晰中文错误(句柄已丢失)。
+    /// output_kind 缺失(旧任务)时兜底为 Image, 向后兼容。
     fn from_raw_meta(raw_meta: &Value) -> anyhow::Result<ReplicateHandle> {
         let prediction_id = raw_meta
             .get("prediction_id")
@@ -71,11 +87,35 @@ impl ReplicateHandle {
             .get("cancel_url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let output_kind = raw_meta
+            .get("output_kind")
+            .and_then(|v| v.as_str())
+            .map(asset_kind_from_str)
+            .unwrap_or(AssetKind::Image);
         Ok(ReplicateHandle {
             prediction_id,
             get_url,
             cancel_url,
+            output_kind,
         })
+    }
+}
+
+/// AssetKind -> 稳定字符串(raw_meta 序列化用)。
+fn asset_kind_to_str(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Video => "video",
+        AssetKind::Audio => "audio",
+        AssetKind::Image => "image",
+    }
+}
+
+/// 稳定字符串 -> AssetKind(raw_meta 反序列化用)。未知归 Image(保守兜底)。
+fn asset_kind_from_str(s: &str) -> AssetKind {
+    match s {
+        "video" => AssetKind::Video,
+        "audio" => AssetKind::Audio,
+        _ => AssetKind::Image,
     }
 }
 
@@ -90,8 +130,13 @@ impl ReplicateProvider {
     pub fn new() -> ReplicateProvider {
         ReplicateProvider {
             http: reqwest::Client::new(),
-            // MVP 声明 text2image(flux-schnell 文生图); 后续可按 model 扩能力。
-            caps: vec![Capability::Text2Image],
+            // 声明 text2image(flux-schnell)+ 文生视频/图生视频。Replicate 托管大量视频模型,
+            // 仍走 prediction 异步(提交->轮询->output url), 只是 model 不同、产物是 video。
+            caps: vec![
+                Capability::Text2Image,
+                Capability::Text2Video,
+                Capability::Image2Video,
+            ],
         }
     }
 
@@ -153,12 +198,18 @@ pub fn build_prediction_body(req: &GenRequest) -> Value {
         input.insert(k.clone(), v.clone());
     }
 
-    // 第一张图片输入 -> input.image(若已是 URL)。本地路径需先上传, MVP 仅接受 URL 输入。
+    // 第一张图片输入 -> 喂图字段(若已是 URL)。本地路径需先上传, MVP 仅接受 URL 输入。
+    // 字段名随能力区分: 图生视频(image2video)Replicate 视频模型(如 kling)用 `start_image`;
+    // 图生图(image2image)用 `image`。两个字段名不同, 按 capability 选对字段, 否则模型忽略输入图。
+    let image_field = match req.capability {
+        Capability::Image2Video => "start_image",
+        _ => "image",
+    };
     for asset in req.inputs.iter() {
         let is_image = matches!(asset.kind, AssetKind::Image);
         if is_image {
             if let Some(url) = &asset.url {
-                input.insert("image".to_string(), json!(url));
+                input.insert(image_field.to_string(), json!(url));
                 break;
             }
         }
@@ -170,35 +221,47 @@ pub fn build_prediction_body(req: &GenRequest) -> Value {
 /// 从 Replicate 的 `output` 字段抽取产物素材(纯函数, 便于离线单测)。
 ///
 /// Replicate 不同模型 output 形态不一, 这里覆盖常见几种(字符串 / 字符串数组 /
-/// 对象数组 / 单对象取 "url" 字段)。flux-schnell 即"字符串数组"形态。
-/// 取不到任何 URL 返回空向量, 由调用方据响应兜底报错。kind 统一按 Image
-/// (本 provider MVP 只声明 text2image; 接视频模型时再按 model 区分 kind)。
-pub fn extract_replicate_outputs(output: &Value) -> Vec<Asset> {
+/// 对象数组 / 单对象取 "url" 字段)。flux-schnell 即"字符串数组"形态;
+/// 视频模型(如 kling)则是单个 video URL 字符串。
+/// 取不到任何 URL 返回空向量, 由调用方据响应兜底报错。产物 kind 由 `kind` 入参决定
+/// (文生图/图生图 -> Image, 文生视频/图生视频 -> Video), 让视频落盘为 .mp4。
+pub fn extract_replicate_outputs(output: &Value, kind: AssetKind) -> Vec<Asset> {
     let mut out = Vec::new();
-    push_assets_from_value(output, &mut out);
+    push_assets_from_value(output, kind, &mut out);
     out
 }
 
-/// 递归地从一个 output 值里收集图片 URL(支持字符串 / 数组 / 对象三种形态)。
-fn push_assets_from_value(value: &Value, out: &mut Vec<Asset>) {
+/// 把 capability 映射到产物 AssetKind: 视频能力 -> Video, 其余 -> Image。
+/// submit/poll 据此告诉抽取函数应把 URL 标成图还是视频(决定落盘扩展名)。
+fn output_kind_for(capability: Capability) -> AssetKind {
+    match capability {
+        Capability::Text2Video => AssetKind::Video,
+        Capability::Image2Video => AssetKind::Video,
+        Capability::FramesToVideo => AssetKind::Video,
+        _ => AssetKind::Image,
+    }
+}
+
+/// 递归地从一个 output 值里收集产物 URL(支持字符串 / 数组 / 对象三种形态)。
+fn push_assets_from_value(value: &Value, kind: AssetKind, out: &mut Vec<Asset>) {
     match value {
         // 直接是 URL 字符串
         Value::String(s) => {
             if !s.is_empty() {
-                out.push(Asset::from_url(AssetKind::Image, s));
+                out.push(Asset::from_url(kind, s));
             }
         }
         // 数组: 逐项递归(每项可能是字符串或对象)
         Value::Array(arr) => {
             for item in arr.iter() {
-                push_assets_from_value(item, out);
+                push_assets_from_value(item, kind, out);
             }
         }
         // 对象: 取 "url" 字段(部分模型把产物包成 { "url": ... })
         Value::Object(obj) => {
             if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
                 if !url.is_empty() {
-                    out.push(Asset::from_url(AssetKind::Image, url));
+                    out.push(Asset::from_url(kind, url));
                 }
             }
         }
@@ -229,13 +292,36 @@ impl Provider for ReplicateProvider {
     }
 
     fn catalog(&self) -> Vec<crate::core::catalog::ModelEntry> {
-        // 默认暴露 flux-schnell(alias "flux-schnell", 与 fal 的 "flux" 区分避免歧义)。
-        vec![crate::core::catalog::ModelEntry::single(
-            PROVIDER_NAME,
-            DEFAULT_T2I_MODEL,
-            Some("flux-schnell"),
-            Capability::Text2Image,
-        )]
+        // 图像 flux-schnell + 若干视频模型。视频 owner/name 版本以 Replicate 平台为准, 可 --model 覆盖。
+        vec![
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_T2I_MODEL,
+                Some("flux-schnell"),
+                Capability::Text2Image,
+            ),
+            // 文生视频: 可灵 Kling v2.1(alias "rep-kling")。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_T2V_MODEL,
+                Some("rep-kling"),
+                Capability::Text2Video,
+            ),
+            // 图生视频: 同 kling 模型带 start_image(alias "rep-kling-i2v")。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                DEFAULT_I2V_MODEL,
+                Some("rep-kling-i2v"),
+                Capability::Image2Video,
+            ),
+            // 文生视频: MiniMax Hailuo(alias "rep-minimax")。Replicate 上另一常用视频家族。
+            crate::core::catalog::ModelEntry::single(
+                PROVIDER_NAME,
+                "minimax/video-01",
+                Some("rep-minimax"),
+                Capability::Text2Video,
+            ),
+        ]
     }
 
     fn has_key(&self) -> bool {
@@ -302,17 +388,20 @@ impl Provider for ReplicateProvider {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // 产物 kind 按本次请求能力定(视频 -> Video), 随句柄流转供 poll 复用。
+        let output_kind = output_kind_for(req.capability);
         let handle = ReplicateHandle {
             prediction_id: prediction_id.clone(),
             get_url,
             cancel_url,
+            output_kind,
         };
 
         // 5. 若创建即返回终态(小模型偶发同步完成), 顺手解析产物; 否则留待 poll。
         let mut outputs = Vec::new();
         if status == JobStatus::Succeeded {
             if let Some(output) = created.get("output") {
-                outputs = extract_replicate_outputs(output);
+                outputs = extract_replicate_outputs(output, output_kind);
             }
         }
         let error = match status {
@@ -374,7 +463,8 @@ impl Provider for ReplicateProvider {
         match status {
             JobStatus::Succeeded => {
                 if let Some(output) = polled.get("output") {
-                    next.outputs = extract_replicate_outputs(output);
+                    // 用句柄里记的 output_kind(submit 时按 capability 定), 让视频标成 Video 落 .mp4。
+                    next.outputs = extract_replicate_outputs(output, handle.output_kind);
                 }
                 if let Some(obj) = next.raw_meta.as_object_mut() {
                     if let Some(output) = polled.get("output") {
@@ -497,7 +587,7 @@ mod tests {
             "https://replicate.delivery/a.webp",
             "https://replicate.delivery/b.webp"
         ]);
-        let outputs = extract_replicate_outputs(&output);
+        let outputs = extract_replicate_outputs(&output, AssetKind::Image);
         assert_eq!(outputs.len(), 2);
         match outputs[0].source() {
             AssetSource::Url(u) => assert_eq!(u, "https://replicate.delivery/a.webp"),
@@ -510,7 +600,7 @@ mod tests {
     fn extract_outputs_from_single_string() {
         // 部分模型 output 是单个 URL 字符串
         let output = json!("https://replicate.delivery/single.png");
-        let outputs = extract_replicate_outputs(&output);
+        let outputs = extract_replicate_outputs(&output, AssetKind::Image);
         assert_eq!(outputs.len(), 1);
         assert_eq!(
             outputs[0].url.as_deref(),
@@ -522,7 +612,7 @@ mod tests {
     fn extract_outputs_from_object_array() {
         // 部分模型把产物包成 { "url": ... } 对象
         let output = json!([{ "url": "https://replicate.delivery/obj.png" }]);
-        let outputs = extract_replicate_outputs(&output);
+        let outputs = extract_replicate_outputs(&output, AssetKind::Image);
         assert_eq!(outputs.len(), 1);
         assert_eq!(
             outputs[0].url.as_deref(),
@@ -533,8 +623,8 @@ mod tests {
     #[test]
     fn extract_outputs_empty_when_no_url() {
         // null / 空数组 -> 无产物
-        assert!(extract_replicate_outputs(&json!(null)).is_empty());
-        assert!(extract_replicate_outputs(&json!([])).is_empty());
+        assert!(extract_replicate_outputs(&json!(null), AssetKind::Image).is_empty());
+        assert!(extract_replicate_outputs(&json!([]), AssetKind::Image).is_empty());
         // error 文本可从顶层 error 抽出
         let err_resp = json!({ "status": "failed", "error": "NSFW content detected" });
         assert_eq!(extract_error_text(&err_resp), "NSFW content detected");
@@ -547,12 +637,49 @@ mod tests {
             prediction_id: "pred-1".to_string(),
             get_url: "https://api.replicate.com/v1/predictions/pred-1".to_string(),
             cancel_url: Some("https://api.replicate.com/v1/predictions/pred-1/cancel".to_string()),
+            output_kind: AssetKind::Video,
         };
         let raw_meta = handle.to_raw_meta();
         let restored = ReplicateHandle::from_raw_meta(&raw_meta).expect("应能还原句柄");
         assert_eq!(restored.prediction_id, "pred-1");
         assert_eq!(restored.get_url, handle.get_url);
         assert_eq!(restored.cancel_url, handle.cancel_url);
+        // output_kind 必须原样还原, 否则 poll 会把视频 output 误标成 Image。
+        assert_eq!(restored.output_kind, AssetKind::Video);
+    }
+
+    #[test]
+    fn output_kind_maps_video_capabilities() {
+        // 视频能力映射 Video, 其余 Image。
+        assert_eq!(output_kind_for(Capability::Text2Video), AssetKind::Video);
+        assert_eq!(output_kind_for(Capability::Image2Video), AssetKind::Video);
+        assert_eq!(output_kind_for(Capability::Text2Image), AssetKind::Image);
+    }
+
+    #[test]
+    fn extract_video_output_marked_as_video_kind() {
+        // Replicate 视频模型 output 是单个 video url 字符串, 应标成 Video(供落盘 .mp4)。
+        let output = json!("https://replicate.delivery/out.mp4");
+        let outputs = extract_replicate_outputs(&output, AssetKind::Video);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, AssetKind::Video);
+        assert_eq!(outputs[0].url.as_deref(), Some("https://replicate.delivery/out.mp4"));
+    }
+
+    #[test]
+    fn build_body_i2v_uses_start_image_field() {
+        // 图生视频: Replicate 视频模型用 start_image 而非 image。
+        let req = GenRequest {
+            capability: Capability::Image2Video,
+            model: DEFAULT_I2V_MODEL.to_string(),
+            prompt: Some("make it move".to_string()),
+            inputs: vec![Asset::from_url(AssetKind::Image, "https://x/in.png")],
+            params: serde_json::Map::new(),
+        };
+        let body = build_prediction_body(&req);
+        assert_eq!(body["input"]["start_image"].as_str(), Some("https://x/in.png"));
+        // image2video 不应把图放进 image 字段
+        assert!(body["input"].get("image").is_none());
     }
 
     #[test]

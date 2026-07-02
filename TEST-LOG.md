@@ -224,3 +224,14 @@
 - `source ~/.cargo/env && export TMPDIR=/root/bigtmp`
 - `cargo clippy --all-targets -- -D warnings && cargo test`
 - 握手冒烟: `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | cargo run -q -- mcp`
+
+## 2026-07-02 · fal/replicate 扩展视频能力(text2video + image2video)
+
+- **改动**:fal/replicate 各加 Text2Video/Image2Video 能力 + 视频 catalog 条目;replicate 产物解析改为 capability 感知(视频标 AssetKind::Video,output_kind 随句柄跨进程流转);replicate i2v 输入图用 start_image 字段;cli default_model_for 加两家视频默认;pricing 两家视频已按能力占位 0.50 USD。fal 视频复用现有 Queue API(产物 video.url 已被 extract_outputs 解析)。
+- **WebFetch 核实(2026-06-26/07-02)**:fal 视频走同一 Queue API,endpoint 如 fal-ai/kling-video/v2/master/text-to-video,产物 output.video.url;replicate 视频走 prediction 异步,model 如 kwaivgi/kling-v2.1、minimax/video-01,产物单个 video url 字符串。
+- **方法**:cargo build / clippy(-D warnings)/ test 全绿;providers、model --json、无 key 视频 generate 冒烟。
+- **结果**:build OK;clippy 0 warning;test 195 passed(190→195,新增 5:fal 视频能力/catalog 各 1、replicate output_kind roundtrip/视频 kind/i2v start_image/output_kind 映射)。
+  - providers:fal/replicate 均显示 text2image, text2video, image2video。
+  - model --json:含 fal-kling/fal-kling-i2v/fal-minimax、rep-kling/rep-kling-i2v/rep-minimax,能力标 text2video/image2video。
+  - 无 key `generate --provider fal --capability text2video`:走到缺 key 报错(路由通),预估成本 0.50 USD,真实退出码 1。
+- **未覆盖边界**:未做真实联调(无 key);fal/replicate 视频 endpoint 版本号会随平台改版而变(注释已标以平台为准,可 --model 覆盖);本地文件输入图仍需先是 URL(与图像 i2i 一致,未实现自动上传);视频参数(duration/aspect_ratio)靠 --param 透传,未做 per-model schema 校验。
