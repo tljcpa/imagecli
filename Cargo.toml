@@ -21,9 +21,8 @@ anyhow = "1"
 thiserror = "2"
 # 异步 trait
 async-trait = "0.1"
-# 系统钥匙串, 密钥回退存储
-# 选 linux-native(内核 keyutils)后端: 纯 Rust, 不依赖 dbus/openssl 等系统库, 编译最稳
-keyring = { version = "3", default-features = false, features = ["linux-native"] }
+# 系统钥匙串(密钥回退存储)见文件末尾的 target-specific 依赖:
+# 按平台选原生后端(Linux keyutils / Windows 凭据管理器 / macOS 钥匙串), 保证跨平台编译
 # 金额/成本估算用定点十进制, 绝不用 f64
 rust_decimal = "1"
 # 随机数, 用于轮询退避的 jitter
@@ -49,3 +48,14 @@ hex = "0.4"
 [dev-dependencies]
 # 测试时需要的额外能力(当前主要用 tokio 宏)
 tokio = { version = "1", features = ["rt", "macros"] }
+
+# 系统钥匙串: 按平台选原生后端, 保证 Windows / macOS / Linux 都能编译
+# Linux: 内核 keyutils(纯 Rust, 不依赖 dbus/openssl)
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["linux-native"] }
+# Windows: 凭据管理器(Windows Credential Manager)
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+# macOS: 钥匙串(Keychain)
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
