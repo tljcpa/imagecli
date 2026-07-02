@@ -1,5 +1,7 @@
 # imagecli
 
+![CI](https://github.com/tljcpa/imagecli/actions/workflows/ci.yml/badge.svg)
+
 一个通用的、多 provider 的**图像 / 视频**生成命令行工具:一套命令统一调度 13 家有公开 API 的生成模型(fal、Google Gemini、OpenAI、Replicate、火山 Seedream、即梦、可灵、Seedance、智谱、阶跃、SiliconFlow、PPIO、agnes),把"提交—轮询—下载"的异步编排做成统一内核,并做成 agent 可直接调用的 MCP server。
 
 ## 为什么做它
